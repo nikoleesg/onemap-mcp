@@ -8,7 +8,7 @@ import { registerRouteTransitTool } from "./tools/routeTransit.js";
 import { registerNearbyTransportTool } from "./tools/nearbyTransport.js";
 
 const SERVER_NAME = "onemap-mcp";
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 
 /** Builds a fresh McpServer bound to this request's `env` (KV binding + secrets). */
 export function buildServer(env: Env): McpServer {

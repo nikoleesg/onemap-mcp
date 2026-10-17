@@ -7,15 +7,15 @@
     "enabled": true
   },
   // Caches the OneMap bearer token (valid ~3 days) across requests so most
-  // tool calls skip the getToken round trip. Create with:
-  //   npx wrangler kv namespace create ONEMAP_TOKEN_CACHE
-  // then replace the id below with the one it prints.
+  // tool calls skip the getToken round trip. No "id" on purpose: wrangler's
+  // automatic resource provisioning creates the namespace on the first deploy
+  // and keeps the Worker linked to it on later ones, so no account-specific
+  // id is committed here.
   "kv_namespaces": [
     {
-      "binding": "ONEMAP_TOKEN_CACHE",
-      "id": "<YOUR_KV_NAMESPACE_ID>"
+      "binding": "ONEMAP_TOKEN_CACHE"
     }
   ]
   // Secrets (never set here — see README "Setup"), all required:
-  //   ONEMAP_EMAIL, ONEMAP_PASSWORD, MCP_SHARED_SECRET
+  //   ONEMAP_EMAIL, ONEMAP_PASSWORD
 }

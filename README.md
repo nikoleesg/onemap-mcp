@@ -14,7 +14,7 @@ Routing is split into two tools rather than one, because OneMap's `routeType=pt`
 - No `/mcp` path — the Worker's base URL *is* the MCP endpoint. The transport doesn't care about the request path, only method/headers/body, so nothing is mounted under a subpath.
 - The OneMap bearer token (valid ~3 days) is cached in a Workers KV namespace so most tool calls skip the `getToken` round trip; a new token is fetched automatically when the cached one is close to expiry.
 - All five tools require a valid OneMap token on every call and fail closed: if a token can't be obtained (e.g. missing/invalid `ONEMAP_EMAIL`/`ONEMAP_PASSWORD`) or OneMap rejects it, the tool returns an error instead of calling the underlying API unauthenticated. `nearby_transport` differs slightly in how OneMap surfaces auth/validation errors — see its section below.
-- This Worker's own MCP endpoint is gated by a required `MCP_SHARED_SECRET` bearer token — every request must present it (see "Setup"). A deployment with the secret unset returns `500`, not an open endpoint. A plain browser visit (no MCP client) still gets a friendly status message, unauthenticated.
+- The Worker does no authentication of its own — it relies on a Cloudflare Access application in front of it (see "Access control").
 
 ## Requirements
 
@@ -27,16 +27,10 @@ Routing is split into two tools rather than one, because OneMap's `routeType=pt`
 ```bash
 npm install
 
-# Create the KV namespace used to cache the OneMap token, then paste the
-# printed id into wrangler.jsonc's kv_namespaces[0].id
-npx wrangler kv namespace create ONEMAP_TOKEN_CACHE
-
-# Secrets — never committed, set per environment. All three are required;
-# the Worker fails closed (500, and the tools error out) if any are
-# missing.
+# Secrets — never committed, set per environment. Both are required; the
+# tools fail closed (error out) if either is missing.
 npx wrangler secret put ONEMAP_EMAIL
 npx wrangler secret put ONEMAP_PASSWORD
-npx wrangler secret put MCP_SHARED_SECRET   # e.g. `openssl rand -hex 32`
 ```
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and fill in real values (`.dev.vars` is gitignored) — `wrangler dev` reads secrets from there instead of the Cloudflare dashboard.
@@ -53,6 +47,8 @@ npm run typecheck   # tsc --noEmit
 ```bash
 npm run deploy       # wrangler deploy
 ```
+
+The `ONEMAP_TOKEN_CACHE` KV binding in `wrangler.jsonc` has no `id`: wrangler's [automatic resource provisioning](https://developers.cloudflare.com/changelog/2025-10-24-automatic-resource-provisioning/) (wrangler ≥ 4.45, open beta) creates the namespace on the first deploy and keeps the Worker linked to it afterwards — there's no namespace to create by hand and no id to paste in. If wrangler writes an `id` back into `wrangler.jsonc`, don't commit it. The namespace only caches the OneMap token, so if a deploy ever ends up bound to a fresh one, the only effect is one extra `getToken` call.
 
 This deploys to `https://onemap-mcp.<your-subdomain>.workers.dev` (or a custom route, if configured in `wrangler.jsonc`) — connect an MCP client directly to that base URL, no path suffix.
 
@@ -140,6 +136,14 @@ Unlike the other four tools, OneMap's Nearby Transport endpoints return errors a
 
 All five tools are registered bare — `search`, `reverse_geocode`, `route`, `route_transit`, `nearby_transport`, not `onemap_search`/etc. — deliberately, because the ContextForge gateway this server is meant to run behind auto-prefixes tool names with the upstream server's name on the way through. Registered bare here, they surface as `onemap_search`/`onemap_reverse_geocode`/`onemap_route`/`onemap_route_transit`/`onemap_nearby_transport` once wrapped in the gateway — matching MCP's collision-avoidance convention (a service-prefixed name) without hardcoding the prefix twice. A client connecting to this Worker directly (bypassing ContextForge) sees the bare names instead.
 
+## Access control
+
+This Worker does no authentication of its own: it is meant to sit behind a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) self-hosted application, which authenticates every request at Cloudflare's edge before it reaches the Worker. Without one in front of it, the endpoint is open to anyone who finds the URL.
+
+- **Make the Worker itself the Access destination** (Workers & Pages → the Worker → Access → *Protect this Worker behind Access* → **All traffic**, or a self-hosted application whose destination is this Worker). That covers every way in — routes, custom domains, the `*.workers.dev` URL and preview URLs. A hostname-based application covers only the hostnames it lists, so the `*.workers.dev` and preview URLs would stay open unless they're listed too.
+- **Machine clients (e.g. the ContextForge gateway)** authenticate with an Access **service token**: add a *Service Auth* policy for it to the application, and the client sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` on every request (see "Client config"). Create the token under Zero Trust → Access → Service credentials → Service Tokens; the secret is shown only once.
+- A plain browser visit gets Access's login page; once signed in, it reaches the Worker's friendly status message.
+
 ## Client config
 
 This is a remote streamable-HTTP MCP server. Point any MCP client (including the ContextForge gateway) at the deployed base URL — there is no `/mcp` path suffix:
@@ -151,19 +155,20 @@ This is a remote streamable-HTTP MCP server. Point any MCP client (including the
       "type": "streamable-http",
       "url": "https://onemap-mcp.<YOUR_WORKERS_SUBDOMAIN>.workers.dev",
       "headers": {
-        "Authorization": "Bearer <MCP_SHARED_SECRET>"
+        "CF-Access-Client-Id": "<CF_ACCESS_CLIENT_ID>",
+        "CF-Access-Client-Secret": "<CF_ACCESS_CLIENT_SECRET>"
       }
     }
   }
 }
 ```
 
-The `headers` block is required — `MCP_SHARED_SECRET` must be set on every deployment, and every protocol request must present it or the Worker rejects it (401 if wrong, 500 if the deployment forgot to configure the secret at all).
+The `headers` carry a Cloudflare Access service token — see "Access control" for where to create one. Without them, Access answers with a redirect to its login page instead of forwarding the request. Replace the `url` with your custom domain if the Access application is on one.
 
 ## Security notes
 
-- No OneMap credentials or Cloudflare identifiers are stored in this repo — `ONEMAP_EMAIL`/`ONEMAP_PASSWORD`/`MCP_SHARED_SECRET` are Worker secrets, and the KV namespace id in `wrangler.jsonc` is a `<PLACEHOLDER>` you replace with your own.
-- `MCP_SHARED_SECRET` is mandatory: without it configured, the Worker refuses all protocol traffic rather than serving it openly. This prevents anyone who finds the `*.workers.dev` URL from driving OneMap searches under your account's quota.
+- No OneMap credentials or Cloudflare identifiers are stored in this repo — `ONEMAP_EMAIL`/`ONEMAP_PASSWORD` are Worker secrets, and `wrangler.jsonc` carries no KV namespace id — wrangler provisions and links the namespace at deploy time.
+- The Cloudflare Access application is mandatory: the Worker itself accepts any request, so without Access in front of every hostname it answers on, anyone who finds the URL can drive OneMap searches under your account's quota.
 
 ## Out of scope
 
